@@ -91,6 +91,11 @@ namespace SnerdMQ
 
         public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute, bool? autoDedupe)
         {
+            return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, rateLimitGroup, maxPerMinute, autoDedupe, null);
+        }
+
+        public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute, bool? autoDedupe, double? urgencyScore)
+        {
             if (_process == null || _process.HasExited)
             {
                 return Task.FromException(new InvalidOperationException("[Snerd] Cannot enqueue task: Queue is not running."));
@@ -115,6 +120,10 @@ namespace SnerdMQ
             if (autoDedupe.HasValue)
             {
                 sb.Append($",\"auto_dedupe\":{(autoDedupe.Value ? "true" : "false")}");
+            }
+            if (urgencyScore.HasValue)
+            {
+                sb.Append($",\"urgency_score\":{urgencyScore.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
             }
             sb.Append("}");
             
