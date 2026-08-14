@@ -80,15 +80,32 @@ namespace SnerdMQ
 
         public void Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours)
         {
+            Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, null, null);
+        }
+
+        public void Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute)
+        {
             if (_process == null || _process.HasExited)
             {
                 throw new InvalidOperationException("[Snerd] Cannot enqueue task: Queue is not running.");
             }
 
             string escapedJson = jsonData.Replace("\"", "\\\"");
-            string msg = $"{{\"action\":\"enqueue\",\"task_id\":\"{taskId}\",\"task_type\":\"{taskType}\",\"task_data\":\"{escapedJson}\",\"max_retries\":{maxRetries},\"retry_after_hours\":{retryAfterHours.ToString(System.Globalization.CultureInfo.InvariantCulture)}}}";
             
-            SendMessage(msg);
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"{{\"action\":\"enqueue\",\"task_id\":\"{taskId}\",\"task_type\":\"{taskType}\",\"task_data\":\"{escapedJson}\",\"max_retries\":{maxRetries},\"retry_after_hours\":{retryAfterHours.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+            
+            if (rateLimitGroup != null)
+            {
+                sb.Append($",\"rate_limit_group\":\"{rateLimitGroup}\"");
+            }
+            if (maxPerMinute.HasValue)
+            {
+                sb.Append($",\"max_per_minute\":{maxPerMinute.Value}");
+            }
+            sb.Append("}");
+            
+            SendMessage(sb.ToString());
         }
 
         private void SendMessage(string json)
