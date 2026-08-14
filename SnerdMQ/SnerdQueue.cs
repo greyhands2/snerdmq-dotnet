@@ -17,6 +17,7 @@ namespace SnerdMQ
         private Process _process;
         private StreamWriter _writer;
         private CancellationTokenSource _cts = new();
+        private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _pendingEnqueues = new();
 
         public SnerdQueue(string binaryPath = null, string storagePath = null)
         {
@@ -78,17 +79,25 @@ namespace SnerdMQ
             }
         }
 
-        public void Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours)
+        public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours)
         {
-            Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, null, null);
+            return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, null, null, null);
         }
 
-        public void Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute)
+        public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute)
+        {
+            return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, rateLimitGroup, maxPerMinute, null);
+        }
+
+        public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute, bool? autoDedupe)
         {
             if (_process == null || _process.HasExited)
             {
-                throw new InvalidOperationException("[Snerd] Cannot enqueue task: Queue is not running.");
+                return Task.FromException(new InvalidOperationException("[Snerd] Cannot enqueue task: Queue is not running."));
             }
+
+            var tcs = new TaskCompletionSource<bool>();
+            _pendingEnqueues[taskId] = tcs;
 
             string escapedJson = jsonData.Replace("\"", "\\\"");
             
@@ -103,9 +112,14 @@ namespace SnerdMQ
             {
                 sb.Append($",\"max_per_minute\":{maxPerMinute.Value}");
             }
+            if (autoDedupe.HasValue)
+            {
+                sb.Append($",\"auto_dedupe\":{(autoDedupe.Value ? "true" : "false")}");
+            }
             sb.Append("}");
             
             SendMessage(sb.ToString());
+            return tcs.Task;
         }
 
         private void SendMessage(string json)
@@ -173,6 +187,27 @@ namespace SnerdMQ
                         SendMessage($"{{\"action\":\"result\",\"task_id\":\"{taskId}\",\"status\":\"error\",\"error_msg\":\"{errorMsg}\"}}");
                     }
                 });
+            }
+            else if (action == "ack")
+            {
+                string taskId = ExtractJsonField(line, "task_id");
+                if (taskId != null && _pendingEnqueues.TryRemove(taskId, out var tcs))
+                {
+                    tcs.TrySetResult(true);
+                }
+            }
+            else if (action == "error")
+            {
+                string taskId = ExtractJsonField(line, "task_id");
+                string message = ExtractJsonField(line, "message");
+                if (taskId != null && _pendingEnqueues.TryRemove(taskId, out var tcs))
+                {
+                    tcs.TrySetException(new InvalidOperationException(message));
+                }
+                else
+                {
+                    Console.Error.WriteLine($"[Snerd] Error from engine: {message}");
+                }
             }
             else if (action == "max_retries_reached")
             {
