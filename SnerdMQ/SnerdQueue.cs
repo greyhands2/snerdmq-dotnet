@@ -15,6 +15,7 @@ namespace SnerdMQ
         private readonly string _binaryPath;
         private readonly string _storagePath;
         private readonly ConcurrentDictionary<string, Func<string, Task>> _handlers = new();
+        private readonly ConcurrentDictionary<string, Func<string, Task>> _maxRetryHandlers = new();
         
         private Process _process;
         private StreamWriter _writer;
@@ -47,6 +48,20 @@ namespace SnerdMQ
         public void RegisterHandler(string taskType, Action<string> callback)
         {
             _handlers[taskType] = (data) =>
+            {
+                callback(data);
+                return Task.CompletedTask;
+            };
+        }
+
+        public void RegisterMaxRetryHandler(string taskType, Func<string, Task> callback)
+        {
+            _maxRetryHandlers[taskType] = callback;
+        }
+
+        public void RegisterMaxRetryHandler(string taskType, Action<string> callback)
+        {
+            _maxRetryHandlers[taskType] = (data) =>
             {
                 callback(data);
                 return Task.CompletedTask;
@@ -239,7 +254,28 @@ namespace SnerdMQ
             {
                 string taskId = ExtractJsonField(line, "task_id");
                 string taskType = ExtractJsonField(line, "task_type");
-                Console.WriteLine($"[Snerd] Dead Letter Queue: Task {taskId} ({taskType}) permanently failed.");
+
+                if (taskId != null && taskType != null && _maxRetryHandlers.TryGetValue(taskType, out var handler))
+                {
+                    string taskData = ExtractJsonField(line, "task_data");
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            CurrentTaskId.Value = taskId;
+                            string unescapedData = taskData != null ? taskData.Replace("\\\"", "\"").Replace("\\\\", "\\") : "";
+                            await handler(unescapedData);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.Error.WriteLine($"[Snerd] Error in max retry handler for task {taskId}: {ex.Message}");
+                        }
+                    });
+                }
+                else
+                {
+                    Console.WriteLine($"[Snerd] Dead Letter Queue: Task {taskId} ({taskType}) permanently failed.");
+                }
             }
         }
 

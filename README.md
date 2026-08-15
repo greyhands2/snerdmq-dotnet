@@ -1,6 +1,6 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/greyhands2/snerdmq/main/assets/snerdmq-transparent.png" width="200" alt="SnerdMQ Logo"/>
-  <h1>SnerdMQ .NET SDK (v0.2.0)</h1>
+  <h1>SnerdMQ .NET SDK (v0.2.1)</h1>
 </div>
 
 
@@ -59,3 +59,30 @@ class Program
 
 ## How it works
 This SDK spawns a highly-optimized Rust binary as a child process and communicates with it asynchronously over standard I/O pipes. The Rust engine handles all the complex file-locking, retries, and persistence, while invoking your C# delegates natively!
+
+### ☠️ Dead Letter Queue (Handling Permanent Failures)
+
+When a task fails repeatedly and exhausts its `maxRetries`, the SnerdMQ daemon permanently moves it to the Dead Letter Queue. You can hook into this event to alert your team, update your database, or send a Slack message by registering a Max Retry Handler.
+
+```csharp
+// 5. Catch tasks that have permanently failed (Dead Letter Queue)
+queue.RegisterMaxRetryHandler("send_email", (data) => {
+    Console.WriteLine($"Email task failed after all retries! Data: {data}");
+});
+```
+
+---
+
+## 🌍 Advanced: Distributed Scaling
+
+By default, the SDK spins up the Rust daemon which writes the queue to a local file (`.snerdata/tasks/tasks.log`). 
+
+If you have multiple ASP.NET Core servers running behind a load balancer and want them to share the exact same queue, simply mount a **Shared Network Drive** (like AWS EFS or NFS) to all of your servers and pass the shared path into the `SnerdQueue` constructor:
+
+```csharp
+// All of your C# servers point to the exact same shared file!
+// SnerdMQ's native OS file-locking guarantees zero data corruption.
+using var queue = new SnerdQueue(null, "/mnt/aws-efs-shared-drive/snerd_tasks.log");
+```
+
+*Built with ❤️ for John Wick tier engineering.*
