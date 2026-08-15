@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Concurrent;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Diagnostics;
 using System.IO;
 using System.Text.RegularExpressions;
@@ -18,6 +20,9 @@ namespace SnerdMQ
         private StreamWriter _writer;
         private CancellationTokenSource _cts = new();
         private readonly ConcurrentDictionary<string, TaskCompletionSource<bool>> _pendingEnqueues = new();
+        private static readonly AsyncLocal<string> CurrentTaskId = new AsyncLocal<string>();
+        private readonly ConcurrentDictionary<System.Net.WebSockets.WebSocket, byte> _wsClients = new ConcurrentDictionary<System.Net.WebSockets.WebSocket, byte>();
+
 
         public SnerdQueue(string binaryPath = null, string storagePath = null)
         {
@@ -186,6 +191,7 @@ namespace SnerdMQ
                 {
                     try
                     {
+                        CurrentTaskId.Value = taskId;
                         string unescapedData = taskData != null ? taskData.Replace("\\\"", "\"").Replace("\\\\", "\\") : "";
                         await handler(unescapedData);
                         SendMessage($"{{\"action\":\"result\",\"task_id\":\"{taskId}\",\"status\":\"success\"}}");
@@ -218,6 +224,17 @@ namespace SnerdMQ
                     Console.Error.WriteLine($"[Snerd] Error from engine: {message}");
                 }
             }
+            else if (action == "progress")
+            {
+                var buffer = System.Text.Encoding.UTF8.GetBytes(line);
+                foreach (var ws in _wsClients.Keys)
+                {
+                    if (ws.State == System.Net.WebSockets.WebSocketState.Open)
+                    {
+                        _ = ws.SendAsync(new ArraySegment<byte>(buffer), System.Net.WebSockets.WebSocketMessageType.Text, true, CancellationToken.None);
+                    }
+                }
+            }
             else if (action == "max_retries_reached")
             {
                 string taskId = ExtractJsonField(line, "task_id");
@@ -241,5 +258,171 @@ namespace SnerdMQ
                 _process.Dispose();
             }
         }
+    
+        public void YieldProgress(string data)
+        {
+            var taskId = CurrentTaskId.Value;
+            if (taskId == null)
+            {
+                throw new InvalidOperationException("[Snerd] YieldProgress must be called within a task handler context.");
+            }
+            string escapedData = data != null ? data.Replace("\"", "\\\"") : "";
+            SendMessage($"{{\"action\":\"progress\",\"task_id\":\"{taskId}\",\"data\":\"{escapedData}\"}}");
+        }
+
+        public void StartDashboard(int port = 8080)
+        {
+            var listener = new System.Net.HttpListener();
+            listener.Prefixes.Add($"http://*:{port}/");
+            listener.Start();
+            Console.WriteLine($"[Snerd] Dashboard running on http://localhost:{port}");
+
+            _ = Task.Run(async () =>
+            {
+                while (listener.IsListening)
+                {
+                    try
+                    {
+                        var context = await listener.GetContextAsync();
+                        
+                        context.Response.AppendHeader("Access-Control-Allow-Origin", "*");
+                        context.Response.AppendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+                        
+                        if (context.Request.HttpMethod == "OPTIONS")
+                        {
+                            context.Response.StatusCode = 204;
+                            context.Response.Close();
+                            continue;
+                        }
+
+                        if (context.Request.IsWebSocketRequest)
+                        {
+                            var wsContext = await context.AcceptWebSocketAsync(null);
+                            var ws = wsContext.WebSocket;
+                            _wsClients.TryAdd(ws, 0);
+                            
+                            _ = Task.Run(async () =>
+                            {
+                                var buffer = new byte[1024];
+                                try
+                                {
+                                    while (ws.State == System.Net.WebSockets.WebSocketState.Open)
+                                    {
+                                        await ws.ReceiveAsync(new ArraySegment<byte>(buffer), CancellationToken.None);
+                                    }
+                                }
+                                catch { }
+                                finally
+                                {
+                                    _wsClients.TryRemove(ws, out _);
+                                }
+                            });
+                            continue;
+                        }
+
+                        if (context.Request.HttpMethod == "GET")
+                        {
+                            if (context.Request.Url.AbsolutePath == "/")
+                            {
+                                string htmlPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..", "..", "..", "..", "static", "index.html");
+                                if (!System.IO.File.Exists(htmlPath))
+                                {
+                                    htmlPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "static", "index.html");
+                                }
+                                if (System.IO.File.Exists(htmlPath))
+                                {
+                                    context.Response.ContentType = "text/html";
+                                    byte[] buf = System.IO.File.ReadAllBytes(htmlPath);
+                                    context.Response.ContentLength64 = buf.Length;
+                                    await context.Response.OutputStream.WriteAsync(buf, 0, buf.Length);
+                                }
+                                else
+                                {
+                                    context.Response.StatusCode = 404;
+                                }
+                            }
+                            else if (context.Request.Url.AbsolutePath == "/api/stats")
+                            {
+                                int enqueued = 0, processed = 0, failed = 0;
+                                string storage = string.IsNullOrEmpty(_storagePath) ? "./.snerdata" : _storagePath;
+                                string tasksPath = System.IO.Path.Combine(storage, "tasks", "tasks.log");
+                                if (System.IO.File.Exists(tasksPath))
+                                {
+                                    foreach (var line in System.IO.File.ReadLines(tasksPath))
+                                    {
+                                        if (string.IsNullOrWhiteSpace(line)) continue;
+                                        enqueued++;
+                                        if (line.Contains("\"deletedAt\":\""))
+                                        {
+                                            if (line.Contains("\"lastJobError\":\"")) failed++;
+                                            else processed++;
+                                        }
+                                    }
+                                }
+                                string res = $"{{\"enqueued\":{enqueued},\"processed\":{processed},\"failed\":{failed}}}";
+                                context.Response.ContentType = "application/json";
+                                byte[] buf = System.Text.Encoding.UTF8.GetBytes(res);
+                                context.Response.ContentLength64 = buf.Length;
+                                await context.Response.OutputStream.WriteAsync(buf, 0, buf.Length);
+                            }
+                            else if (context.Request.Url.AbsolutePath == "/api/tasks")
+                            {
+                                var tasksMap = new System.Collections.Generic.Dictionary<string, string>();
+                                string storage = string.IsNullOrEmpty(_storagePath) ? "./.snerdata" : _storagePath;
+                                string tasksPath = System.IO.Path.Combine(storage, "tasks", "tasks.log");
+                                if (System.IO.File.Exists(tasksPath))
+                                {
+                                    foreach (var line in System.IO.File.ReadLines(tasksPath))
+                                    {
+                                        if (string.IsNullOrWhiteSpace(line)) continue;
+                                        string tId = ExtractJsonField(line, "taskId");
+                                        if (tId != null) tasksMap[tId] = line;
+                                    }
+                                }
+                                
+                                var sb = new System.Text.StringBuilder("[");
+                                bool first = true;
+                                foreach (var t in tasksMap.Values)
+                                {
+                                    string tId = ExtractJsonField(t, "taskId");
+                                    string tType = ExtractJsonField(t, "taskType");
+                                    string status;
+                                    if (t.Contains("\"deletedAt\":\"")) {
+                                        status = t.Contains("\"lastJobError\":\"") ? "failed" : "completed";
+                                    } else {
+                                        status = t.Contains("\"lastJobError\":\"") ? "failed" : "queued";
+                                    }
+                                    
+                                    string rCount = ExtractJsonField(t, "retryCount");
+                                    string mRetries = ExtractJsonField(t, "maxRetries");
+                                    string rAfter = ExtractJsonField(t, "retryAfterTime");
+                                    
+                                    if (!first) sb.Append(",");
+                                    sb.Append($"{{\"id\":\"{tId}\",\"type\":\"{tType}\",\"status\":\"{status}\",\"progress\":0");
+                                    if (rCount != null) sb.Append($",\"retryCount\":{rCount}");
+                                    if (mRetries != null) sb.Append($",\"maxRetries\":{mRetries}");
+                                    if (rAfter != null) sb.Append($",\"retryAfterTime\":\"{rAfter}\"");
+                                    sb.Append("}");
+                                    first = false;
+                                }
+                                sb.Append("]");
+                                context.Response.ContentType = "application/json";
+                                byte[] buf = System.Text.Encoding.UTF8.GetBytes(sb.ToString());
+                                context.Response.ContentLength64 = buf.Length;
+                                await context.Response.OutputStream.WriteAsync(buf, 0, buf.Length);
+                            }
+                            else
+                            {
+                                context.Response.StatusCode = 404;
+                            }
+                        }
+                        
+                        context.Response.Close();
+                    }
+                    catch { }
+                }
+            });
+        }
+
     }
 }

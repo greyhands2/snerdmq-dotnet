@@ -1,6 +1,8 @@
-# SnerdMQ .NET SDK (`snerdmq-dotnet`)
+<div align="center">
+  <img src="https://raw.githubusercontent.com/greyhands2/snerdmq/main/assets/snerdmq-transparent.png" width="200" alt="SnerdMQ Logo"/>
+  <h1>SnerdMQ .NET SDK (v0.2.0)</h1>
+</div>
 
-The official .NET SDK for SnerdMQ. Execute lightning-fast, persistent background jobs in C#, F#, and VB.NET without setting up Redis or RabbitMQ.
 
 ## Features
 - **Zero Configuration**: No connection strings, no ports, no firewall rules.
@@ -42,7 +44,11 @@ class Program
             taskType: "send_email",
             jsonData: "{\"user\":\"john.wick@example.com\"}",
             maxRetries: 3,
-            retryAfterHours: 0.0
+            retryAfterHours: 0.0,
+            rateLimitGroup: "sendgrid_api",
+            maxPerMinute: 100,
+            autoDedupe: true,
+            urgencyScore: 9.5
         );
 
         // Prevent console app from exiting
