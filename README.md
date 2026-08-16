@@ -1,6 +1,6 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/greyhands2/snerdmq/main/assets/snerdmq-transparent.png" width="200" alt="SnerdMQ Logo"/>
-  <h1>SnerdMQ .NET SDK (v0.2.1)</h1>
+  <h1>SnerdMQ .NET SDK (v0.3.0)</h1>
 </div>
 
 
@@ -9,6 +9,27 @@
 - **Native Task Parallelism**: Leverages C#'s massive `async`/`Task` ThreadPool.
 - **ASP.NET Core Friendly**: Never blocks the main event loop.
 - **Bulletproof Durability**: Uses OS-level file locking for ACID compliance.
+
+## ✨ v0.3.0 AI Features
+- **Smart API Rate-Limiting**: Natively tracks `rateLimitGroup` execution velocity to prevent 429 "Too Many Requests" API errors.
+- **Payload-Hashing Deduplication**: Automatically computes cryptographic hashes to drop duplicate tasks instantly.
+- **Dynamic Float Prioritization**: A native Binary Max-Heap bypasses standard FIFO rules for high urgency tasks.
+
+### ⚙️ Advanced Task Configuration (v0.3.0)
+To power complex AI workflows, tasks can now be configured with advanced orchestration parameters:
+
+* **`autoDedupe` (`bool`)**: If set to `true`, the daemon computes a cryptographic hash of the `taskType` and `data`. If an identical payload is currently sitting in the queue pending execution, this new task is silently dropped. Excellent for preventing duplicate generative AI requests from trigger-happy users!
+* **`urgencyScore` (`double`)**: A value (e.g. `0.99`) used to bypass the standard FIFO queue. SnerdMQ uses a true Binary Max-Heap to continually float tasks with the highest urgency score to the very front of the execution line. Standard tasks default to `0.0`.
+* **`rateLimitGroup` (`string`)**: A custom string (e.g. `"openai_api"` or `"db_writes"`) that groups tasks together for backpressure control.
+* **`maxPerMinute` (`int`)**: Used in conjunction with `rateLimitGroup`. If the queue processes more tasks in this group than the allowed limit within a 60-second rolling window, further tasks in this group are temporarily paused. This natively prevents 429 "Too Many Requests" errors when bursting third-party APIs.
+* **`executeAt` (`DateTime`)**: A timestamp of when the job should be executed in the future.
+* **`cron` (`string`)**: A cron expression (e.g. `"0 * * * *"`) for recurring jobs. Shorthands like `"2h"` or `"10m"` are also supported.
+
+### 🕒 Cron Jobs vs. Retryable Jobs
+When using the new scheduling features, it is important to understand the difference between Cron and Retry behaviors:
+> - **A Cron Job** is a *Repeatable Job* that executes again **only after a success**, on a fixed schedule.
+> - **A Retryable Job** is a *Recovery Job* that executes again **only after a failure**, attempting to recover using the `retryAfterHours` backoff.
+> - **Combined:** If a Cron Job fails, it temporarily uses `retryAfterHours` to retry until it recovers. Once it succeeds, it goes back to ticking on its standard cron schedule!
 
 ## Installation
 *(Coming soon to NuGet)*
@@ -48,7 +69,9 @@ class Program
             rateLimitGroup: "sendgrid_api",
             maxPerMinute: 100,
             autoDedupe: true,
-            urgencyScore: 9.5
+            urgencyScore: 9.5,
+            executeAt: null,
+            cron: "1h" // Runs every 1 hour!
         );
 
         // Prevent console app from exiting
