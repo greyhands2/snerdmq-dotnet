@@ -101,20 +101,20 @@ namespace SnerdMQ
 
         public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours)
         {
-            return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, null, null, null);
+            return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, null, null, null, null, null, null);
         }
 
         public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute)
         {
-            return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, rateLimitGroup, maxPerMinute, null);
+            return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, rateLimitGroup, maxPerMinute, null, null, null, null);
         }
 
         public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute, bool? autoDedupe)
         {
-            return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, rateLimitGroup, maxPerMinute, autoDedupe, null);
+            return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, rateLimitGroup, maxPerMinute, autoDedupe, null, null, null);
         }
 
-        public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute, bool? autoDedupe, double? urgencyScore)
+        public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute, bool? autoDedupe, double? urgencyScore, DateTime? executeAt = null, string cron = null)
         {
             if (_process == null || _process.HasExited)
             {
@@ -144,6 +144,15 @@ namespace SnerdMQ
             if (urgencyScore.HasValue)
             {
                 sb.Append($",\"urgency_score\":{urgencyScore.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+            }
+            if (executeAt.HasValue)
+            {
+                // Format as ISO 8601 string
+                sb.Append($",\"execute_at\":\"{executeAt.Value.ToString("O")}\"");
+            }
+            if (!string.IsNullOrEmpty(cron))
+            {
+                sb.Append($",\"cron\":\"{cron}\"");
             }
             sb.Append("}");
             
