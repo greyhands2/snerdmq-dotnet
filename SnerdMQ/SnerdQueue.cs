@@ -114,7 +114,7 @@ namespace SnerdMQ
             return Enqueue(taskId, taskType, jsonData, maxRetries, retryAfterHours, rateLimitGroup, maxPerMinute, autoDedupe, null, null, null, null);
         }
 
-        public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute, bool? autoDedupe, double? urgencyScore, DateTime? executeAt = null, string cron = null, string webhookUrl = null)
+        public Task Enqueue(string taskId, string taskType, string jsonData, int maxRetries, double retryAfterHours, string rateLimitGroup, int? maxPerMinute, bool? autoDedupe, double? urgencyScore, DateTime? executeAt = null, string cron = null, string webhookUrl = null, int? maxExecutionSeconds = null)
         {
             if (_process == null || _process.HasExited)
             {
@@ -157,6 +157,10 @@ namespace SnerdMQ
             if (!string.IsNullOrEmpty(webhookUrl))
             {
                 sb.Append($",\"webhook_url\":\"{webhookUrl}\"");
+            }
+            if (maxExecutionSeconds.HasValue)
+            {
+                sb.Append($",\"max_execution_seconds\":{maxExecutionSeconds.Value}");
             }
             sb.Append("}");
             
@@ -205,6 +209,8 @@ namespace SnerdMQ
                 string taskId = ExtractJsonField(line, "task_id");
                 string taskType = ExtractJsonField(line, "task_type");
                 string taskData = ExtractJsonField(line, "task_data");
+                string maxExecutionStr = ExtractJsonNumberField(line, "max_execution_seconds");
+                int? maxExecutionSeconds = maxExecutionStr != null ? int.Parse(maxExecutionStr) : null;
 
                 if (taskId == null || taskType == null) return;
 
@@ -221,7 +227,20 @@ namespace SnerdMQ
                     {
                         CurrentTaskId.Value = taskId;
                         string unescapedData = taskData != null ? taskData.Replace("\\\"", "\"").Replace("\\\\", "\\") : "";
-                        await handler(unescapedData);
+                        var handlerTask = handler(unescapedData);
+                        
+                        if (maxExecutionSeconds.HasValue)
+                        {
+                            var timeoutTask = Task.Delay(maxExecutionSeconds.Value * 1000);
+                            var completedTask = await Task.WhenAny(handlerTask, timeoutTask);
+                            if (completedTask == timeoutTask)
+                            {
+                                SendMessage($"{{\"action\":\"result\",\"task_id\":\"{taskId}\",\"status\":\"error\",\"error_msg\":\"Task execution timed out after {maxExecutionSeconds.Value} seconds\"}}");
+                                return;
+                            }
+                        }
+                        
+                        await handlerTask;
                         SendMessage($"{{\"action\":\"result\",\"task_id\":\"{taskId}\",\"status\":\"success\"}}");
                     }
                     catch (Exception ex)
@@ -295,6 +314,12 @@ namespace SnerdMQ
         private string ExtractJsonField(string json, string key)
         {
             var match = Regex.Match(json, $"\"{key}\"\\s*:\\s*\"(.*?)(?<!\\\\)\"");
+            return match.Success ? match.Groups[1].Value : null;
+        }
+
+        private string ExtractJsonNumberField(string json, string key)
+        {
+            var match = Regex.Match(json, $"\"{key}\"\\s*:\\s*([0-9.]+)");
             return match.Success ? match.Groups[1].Value : null;
         }
 
