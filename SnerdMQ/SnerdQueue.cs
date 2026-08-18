@@ -171,10 +171,16 @@ namespace SnerdMQ
         private void SendMessage(string json)
         {
             if (_writer == null) return;
+            if (_process.HasExited) return;
             lock (_writer)
             {
-                _writer.WriteLine(json);
-                _writer.Flush();
+                try
+                {
+                    _writer.WriteLine(json);
+                    _writer.Flush();
+                }
+                catch (IOException) { } // Daemon died, pipe broken
+                catch (ObjectDisposedException) { } // Stream already closed
             }
         }
 
