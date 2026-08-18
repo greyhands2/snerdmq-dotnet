@@ -14,6 +14,7 @@
 - **Smart API Rate-Limiting**: Natively tracks `rateLimitGroup` execution velocity to prevent 429 "Too Many Requests" API errors.
 - **Payload-Hashing Deduplication**: Automatically computes cryptographic hashes to drop duplicate tasks instantly.
 - **Dynamic Float Prioritization**: A native Binary Max-Heap bypasses standard FIFO rules for high urgency tasks.
+- **Progress Streaming & Live Dashboard**: Handlers can stream progress updates to a built-in React UI dashboard served by the SDK.
 
 ### ⚙️ Advanced Task Configuration (v0.3.1)
 To power complex AI workflows, tasks can now be configured with advanced orchestration parameters:
@@ -23,6 +24,7 @@ To power complex AI workflows, tasks can now be configured with advanced orchest
 * **`rateLimitGroup` (`string`)**: A custom string (e.g. `"openai_api"` or `"db_writes"`) that groups tasks together for backpressure control.
 * **`maxPerMinute` (`int`)**: Used in conjunction with `rateLimitGroup`. If the queue processes more tasks in this group than the allowed limit within a 60-second rolling window, further tasks in this group are temporarily paused. This natively prevents 429 "Too Many Requests" errors when bursting third-party APIs.
 * **`executeAt` (`DateTime?`)**: A timestamp of when the job should be executed in the future.
+* **`retryAfterHours` (`double`)**: Backoff in **hours** before a failed job is retried (default `0.0`). See *Cron Jobs vs. Retryable Jobs* below.
 * **`cron` (`string`)**: A cron expression (e.g. `"0 * * * *"`) for recurring jobs. Shorthands like `"2h"` or `"10m"` are also supported.
 * **`webhookUrl` (`string`)**: By providing a webhook URL, SnerdMQ will completely bypass your local .NET handlers and dispatch the task payload via an HTTP POST request directly to the specified URL.
 * **`maxExecutionSeconds` (`int?`)**: Optional hard timeout in seconds. If execution takes longer, it's marked as failed.
@@ -70,20 +72,32 @@ class Program
         queue.StartListening();
 
         // 4. Enqueue a persistent background job!
-        queue.Enqueue(
+        await queue.Enqueue(
             taskId: "email_123",
             taskType: "send_email",
             jsonData: "{\"user\":\"john.wick@example.com\"}",
             maxRetries: 3,
-            retryAfterHours: 0.0,
+            retryAfterHours: 0.5,      // Wait 30 minutes before retrying a failed job
             rateLimitGroup: "sendgrid_api",
-            maxPerMinute: 100,
-            autoDedupe: true,
-            urgencyScore: 9.5,
+            maxPerMinute: 100
+        );
+
+        // 5. Need scheduling, deduplication, or serverless execution? All
+        // orchestration options are opt-in — combine only what you need:
+        await queue.Enqueue(
+            taskId: "email_digest_1",
+            taskType: "send_email",
+            jsonData: "{\"user\":\"john.wick@example.com\",\"subject\":\"Daily Digest\"}",
+            maxRetries: 3,
+            retryAfterHours: 0.0,
+            rateLimitGroup: null,      // No rate limit group
+            maxPerMinute: null,        // No max-per-minute cap
+            autoDedupe: true,          // Drop identical pending payloads
+            urgencyScore: 0.99,        // Float to the front of the queue
             executeAt: null,
-            cron: "1h",
-            webhookUrl: "https://api.example.com/webhook",
-            maxExecutionSeconds: 300
+            cron: "0 8 * * *",         // Run every day at 08:00
+            webhookUrl: "https://api.example.com/webhook", // Execute via HTTP instead of local handlers
+            maxExecutionSeconds: 300   // Hard timeout
         );
 
         // Prevent console app from exiting
@@ -105,6 +119,48 @@ queue.RegisterMaxRetryHandler("send_email", (data) => {
     Console.WriteLine($"Email task failed after all retries! Data: {data}");
 });
 ```
+
+---
+
+## 📊 Live Dashboard
+
+SnerdMQ ships with a built-in **React UI dashboard** served directly by the SDK over its embedded `HttpListener` — no extra services or ports to manage in your infrastructure. It gives you a real-time window into your queue:
+
+- **Live stats**: total enqueued, processed, and failed jobs
+- **Recent Jobs table**: per-task status (`queued`, `active`, `completed`, `failed`, `dead_letter`), retry counts, and badges showing which features a task uses (cron / webhook / timeout)
+- **Real-time Progress Stream**: live output from `YieldProgress` calls in your handlers
+
+```csharp
+using var queue = new SnerdQueue();
+
+// Start the built-in dashboard on http://localhost:9090
+queue.StartDashboard(9090);
+
+// ... register handlers, start listening, enqueue jobs ...
+```
+
+Then open **http://localhost:9090** in your browser. Updates are pushed to the page over WebSocket the moment jobs change state (with an automatic HTTP polling fallback), and the dashboard also exposes a small JSON API (`/api/stats`, `/api/tasks`, `/api/progress`) if you want to build your own tooling on top.
+
+> **Note:** The dashboard serves its `static/index.html` from a `static/` folder next to your application's base directory, so make sure the dashboard bundle ships with your deployment. `StartDashboard` only serves the UI — your jobs keep running whether or not the dashboard is open.
+
+---
+
+## 📡 Progress Reporting
+
+Long-running handlers can stream live updates to the Dashboard's Progress Stream (ideal for streaming LLM tokens or multi-step ETL work):
+
+```csharp
+queue.RegisterHandler("generate_report", async (jsonData) =>
+{
+    for (int step = 1; step <= 10; step++)
+    {
+        await DoWorkAsync(step);
+        queue.YieldProgress($"Step {step}/10 complete");
+    }
+});
+```
+
+> `YieldProgress` must be called **inside a task handler** — the SDK tracks which task is currently executing so each update lands on the right job in the dashboard.
 
 ---
 

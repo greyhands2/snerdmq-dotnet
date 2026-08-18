@@ -418,6 +418,7 @@ namespace SnerdMQ
                             else if (context.Request.Url.AbsolutePath == "/api/stats")
                             {
                                 int enqueued = 0, processed = 0, failed = 0;
+                                var tasksMap = new System.Collections.Generic.Dictionary<string, string>();
                                 string storage = string.IsNullOrEmpty(_storagePath) ? "./.snerdata" : _storagePath;
                                 string tasksPath = System.IO.Path.Combine(storage, "tasks", "tasks.log");
                                 if (System.IO.File.Exists(tasksPath))
@@ -425,12 +426,17 @@ namespace SnerdMQ
                                     foreach (var line in System.IO.File.ReadLines(tasksPath))
                                     {
                                         if (string.IsNullOrWhiteSpace(line)) continue;
-                                        enqueued++;
-                                        if (line.Contains("\"deletedAt\":\""))
-                                        {
-                                            if (line.Contains("\"lastJobError\":\"")) failed++;
-                                            else processed++;
-                                        }
+                                        string tId = ExtractJsonField(line, "taskId");
+                                        if (tId != null) tasksMap[tId] = line;
+                                    }
+                                }
+                                foreach (var t in tasksMap.Values)
+                                {
+                                    enqueued++;
+                                    if (t.Contains("\"deletedAt\":"))
+                                    {
+                                        if (t.Contains("\"LastJobError\":")) failed++;
+                                        else processed++;
                                     }
                                 }
                                 string res = $"{{\"enqueued\":{enqueued},\"processed\":{processed},\"failed\":{failed}}}";
@@ -460,22 +466,41 @@ namespace SnerdMQ
                                 {
                                     string tId = ExtractJsonField(t, "taskId");
                                     string tType = ExtractJsonField(t, "taskType");
+                                    string rCount = ExtractJsonNumberField(t, "retryCount") ?? "0";
+                                    string mRetries = ExtractJsonNumberField(t, "maxRetries") ?? "3";
                                     string status;
-                                    if (t.Contains("\"deletedAt\":\"")) {
-                                        status = t.Contains("\"lastJobError\":\"") ? "failed" : "completed";
+                                    if (t.Contains("\"deletedAt\":")) {
+                                        bool hasError = t.Contains("\"LastJobError\":");
+                                        if (hasError && int.TryParse(rCount, out int rc) && int.TryParse(mRetries, out int mr) && rc >= mr) {
+                                            status = "dead_letter";
+                                        } else if (hasError) {
+                                            status = "failed";
+                                        } else {
+                                            status = "completed";
+                                        }
+                                    } else if (t.Contains("\"LastJobError\":")) {
+                                        status = "failed";
                                     } else {
-                                        status = t.Contains("\"lastJobError\":\"") ? "failed" : "queued";
+                                        status = "queued";
+                                        string execAt = ExtractJsonField(t, "executeAt");
+                                        if (execAt != null && DateTimeOffset.TryParse(execAt, out var execTime) && execTime <= DateTimeOffset.UtcNow) {
+                                            status = "active";
+                                        }
                                     }
                                     
-                                    string rCount = ExtractJsonField(t, "retryCount");
-                                    string mRetries = ExtractJsonField(t, "maxRetries");
                                     string rAfter = ExtractJsonField(t, "retryAfterTime");
+                                    string cronExpr = ExtractJsonField(t, "cronExpression");
+                                    string webhookUrl = ExtractJsonField(t, "webhookUrl");
+                                    string maxExecSecs = ExtractJsonNumberField(t, "maxExecutionSeconds");
                                     
                                     if (!first) sb.Append(",");
                                     sb.Append($"{{\"id\":\"{tId}\",\"type\":\"{tType}\",\"status\":\"{status}\",\"progress\":0");
                                     if (rCount != null) sb.Append($",\"retryCount\":{rCount}");
                                     if (mRetries != null) sb.Append($",\"maxRetries\":{mRetries}");
                                     if (rAfter != null) sb.Append($",\"retryAfterTime\":\"{rAfter}\"");
+                                    if (cronExpr != null) sb.Append($",\"cronExpression\":\"{cronExpr}\"");
+                                    if (webhookUrl != null) sb.Append($",\"webhookUrl\":\"{webhookUrl}\"");
+                                    if (maxExecSecs != null) sb.Append($",\"maxExecutionSeconds\":{maxExecSecs}");
                                     sb.Append("}");
                                     first = false;
                                 }
