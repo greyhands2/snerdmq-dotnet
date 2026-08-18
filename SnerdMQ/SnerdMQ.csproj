@@ -11,7 +11,7 @@
     <Authors>Greyhands2</Authors>
     <Company>Greyhands2</Company>
     <Description>A zero-config, C-speed background job queue for the .NET ecosystem. Ditch Redis for an embedded Rust daemon.</Description>
-    <RepositoryUrl>https://github.com/greyhands2/snerdmq-dotnet</RepositoryUrl>
+    <RepositoryUrl>https://github.com/speed-nerd/snerdmq-dotnet</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
