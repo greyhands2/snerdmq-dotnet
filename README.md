@@ -1,6 +1,6 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/speed-nerd/snerdmq/main/assets/snerdmq-transparent.png" width="200" alt="SnerdMQ Logo"/>
-  <h1>SnerdMQ .NET SDK (v0.3.2)</h1>
+  <h1>SnerdMQ .NET SDK (v0.3.3)</h1>
 
   [![Docs](https://img.shields.io/badge/docs-speed--nerd.github.io-blue)](https://speed-nerd.github.io/docs/)
 </div>
@@ -12,13 +12,13 @@
 - **ASP.NET Core Friendly**: Never blocks the main event loop.
 - **Bulletproof Durability**: Uses OS-level file locking for ACID compliance.
 
-## ✨ v0.3.2 AI Features
+## ✨ v0.3.3 AI Features
 - **Smart API Rate-Limiting**: Natively tracks `rateLimitGroup` execution velocity to prevent 429 "Too Many Requests" API errors.
 - **Payload-Hashing Deduplication**: Automatically computes cryptographic hashes to drop duplicate tasks instantly.
 - **Dynamic Float Prioritization**: A native Binary Max-Heap bypasses standard FIFO rules for high urgency tasks.
 - **Progress Streaming & Live Dashboard**: Handlers can stream progress updates to a built-in React UI dashboard served by the SDK.
 
-### ⚙️ Advanced Task Configuration (v0.3.2)
+### ⚙️ Advanced Task Configuration (v0.3.3)
 To power complex AI workflows, tasks can now be configured with advanced orchestration parameters:
 
 * **`autoDedupe` (`bool`)**: If set to `true`, the daemon computes a cryptographic hash of the `taskType` and `data`. If an identical payload is currently sitting in the queue pending execution, this new task is silently dropped. Excellent for preventing duplicate generative AI requests from trigger-happy users!
@@ -166,16 +166,84 @@ queue.RegisterHandler("generate_report", async (jsonData) =>
 
 ---
 
-## 🌍 Advanced: Distributed Scaling
+## 🧩 Queue Topology: One Queue or Many?
 
-By default, the SDK spins up the Rust daemon which writes the queue to a local file (`.snerdata/tasks/tasks.log`). 
+### ✅ Recommended: one queue, all job types (singleton)
 
-If you have multiple ASP.NET Core servers running behind a load balancer and want them to share the exact same queue, simply mount a **Shared Network Drive** (like AWS EFS or NFS) to all of your servers and pass the shared path into the `SnerdQueue` constructor:
+Each `SnerdQueue` client spawns its own Rust daemon and **exclusively owns** its storage directory (`.snerdata` by default). The recommended pattern is **one client per application process**: register every job type on it and serve a single shared dashboard:
 
 ```csharp
-// All of your C# servers point to the exact same shared file!
-// SnerdMQ's native OS file-locking guarantees zero data corruption.
-using var queue = new SnerdQueue(null, "/mnt/aws-efs-shared-drive/snerd_tasks.log");
+using SnerdMQ;
+using System.Threading.Tasks;
+
+class Program
+{
+    static async Task Main(string[] args)
+    {
+        // ONE queue client for the whole app
+        using var queue = new SnerdQueue();
+
+        // Job type #1: image processing
+        queue.RegisterHandler("process_image", (jsonData) =>
+        {
+            Console.WriteLine($"Processing image: {jsonData}");
+        });
+
+        // Job type #2: OTP emails — same queue, same daemon
+        queue.RegisterHandler("send_otp_email", (jsonData) =>
+        {
+            Console.WriteLine($"Sending OTP: {jsonData}");
+        });
+
+        queue.StartListening();
+
+        // Both job types flow through the exact same queue
+        await queue.Enqueue("img-1", "process_image", "{\"image_id\":\"abc123\"}", 3, 0.5);
+        await queue.Enqueue("otp-1", "send_otp_email", "{\"to\":\"john@wick.com\"}", 3, 0.5);
+
+        // ONE dashboard shows every job type
+        queue.StartDashboard(8080);
+    }
+}
 ```
+
+All job types share everything: the same persistent job log, retry/DLQ pipeline, rate-limit state, stats — and one dashboard at `http://localhost:8080` showing all of them.
+
+### 🚫 Same storage twice = fails fast
+
+The daemon takes an **exclusive OS-level lock** on its storage directory at startup. A second client on the same storage fails instead of silently double-executing your jobs:
+
+```csharp
+using var first = new SnerdQueue();  // ✅ owns .snerdata
+using var second = new SnerdQueue(); // ❌ daemon refuses to start:
+// "Another daemon is already running on storage '.snerdata'"
+```
+
+This applies across processes too — in a multi-worker deployment, each worker must either use its own storage directory or talk to a single shared daemon.
+
+### 🔀 Need multiple queues? Give each one its own storage
+
+```csharp
+using var images = new SnerdQueue(null, ".snerdata-images");
+using var emails = new SnerdQueue(null, ".snerdata-emails");
+
+images.StartDashboard(8080); // separate dashboards, so separate ports
+emails.StartDashboard(8081);
+```
+
+Now you have two fully independent engines: separate job logs, separate rate-limit state, separate dashboards. Only split when you actually need isolation (different teams, different retention, independent monitoring) — otherwise the singleton is simpler and recommended.
+
+---
+
+## 🌍 Advanced: Distributed Scaling
+
+Because the daemon exclusively locks its storage directory, scaling horizontally means **one queue per server**, each with its own storage. Your load balancer routes requests across servers, and every server processes the jobs it enqueued:
+
+```csharp
+// Each server runs its own daemon on its own storage dir (local disk works fine)
+using var queue = new SnerdQueue(null, "/var/data/snerd"); // per-server storage
+```
+
+A shared network drive (AWS EFS or NFS) is still a good home for that storage when a single instance needs durable state — e.g. a container that restarts but must keep its queue. Native OS file locking (`flock`) keeps writes safe — no Redis required.
 
 *Built with ❤️ for John Wick tier engineering.*
