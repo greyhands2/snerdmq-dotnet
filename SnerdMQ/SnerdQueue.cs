@@ -202,6 +202,19 @@ namespace SnerdMQ
                 if (!_cts.Token.IsCancellationRequested)
                     Console.Error.WriteLine($"[Snerd] Background Reader Exception: {ex.Message}");
             }
+            finally
+            {
+                // Engine is gone — it can never ack. Fault all pending enqueues
+                // so callers fail fast instead of awaiting forever.
+                foreach (var kvp in _pendingEnqueues)
+                {
+                    if (_pendingEnqueues.TryRemove(kvp.Key, out var tcs))
+                    {
+                        tcs.TrySetException(new InvalidOperationException(
+                            $"[Snerd] Engine terminated before ack for task '{kvp.Key}'"));
+                    }
+                }
+            }
         }
 
         private void ProcessLine(string line)
